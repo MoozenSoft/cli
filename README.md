@@ -35,6 +35,13 @@ A cross-platform header only **C++17** library for interactive command line inte
 >   吞掉）。顺带修掉 `linuxkeyboard.h` 的两处既有问题：`select()` 返回 −1（如终端 resize 的
 >   `EINTR`）时上游掉出函数尾（无返回值，UB）；`fd_set` 只在循环外初始化一次，而 `select`
 >   会改写它，第二轮的 `FD_ISSET` 读的是脏位。
+> * **`examples/` 与 `test/` 未随本 fork 维护。** 其中若干用例仍注册 `int` 等数值参数，
+>   开 `-DCLI_BuildExamples=ON` 或 `-DCLI_BuildTests=ON` 会在**链接期**失败
+>   （`undefined symbol: from_string<int>`）。这是有意保留的响亮哨兵，不是待修 bug：
+>   主消费者（Vase 插件框架）以 submodule 只取头文件，不 `add_subdirectory` 本仓库，碰不到它们。
+> * **`detail/split.h` 仅注释级改动。** 上游 5 处不做判空的 `back()`（`EvalWord` /
+>   `EvalSentence` / `EvalEscape`）经本 fork 复审恒非空，逐处论证以不变式注释写在该文件
+>   `class Text` 头部；不改代码。
 >
 > ### Asio 整体移除
 >

@@ -41,6 +41,9 @@ namespace cli
 namespace detail
 {
 
+// back() 安全性复审（本 fork）：循环内 splitResult 只增不减（erase 在循环之后才发生），
+// 而状态转入 word/sentence/escape 的每条路径都同步或先于此做过 push_back——故这三态下
+// 容器恒非空。逐处依据见各 assert 行注释（NDEBUG 会抹掉 assert，抹不掉的是这里）。
 class Text
 {
 public:
@@ -134,6 +137,7 @@ private:
         }      
         else
         {
+            // word 态只由 EvalSpace 兜底分支（本步 emplace_back）进入，或由 escape 恢复。
             assert(!splitResult.empty());
             splitResult.back() += c;
         }
@@ -148,6 +152,7 @@ private:
                 state = State::space;
             else
             {
+                // sentence 态只由 NewSentence 的 emplace_back("") 进入，进态即非空。
                 assert(!splitResult.empty());
                 splitResult.back() += c;
             }
@@ -159,6 +164,7 @@ private:
         }
         else
         {
+            // 同上：sentence 态进态即非空。
             assert(!splitResult.empty());
             splitResult.back() += c;
         }
@@ -166,6 +172,8 @@ private:
 
     void EvalEscape(char c)
     {
+        // 入 escape 共三条路：EvalSpace 的 '\\' 分支本步 push，word/sentence 的 '\\'
+        // 分支进态前已非空；下面两行 back() 之间无删除，均安全。
         assert(!splitResult.empty());
         if (c != '"' && c != '\'' && c != '\\')
             splitResult.back() += "\\";
