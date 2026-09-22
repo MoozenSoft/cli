@@ -30,9 +30,10 @@
 #ifndef CLI_DETAIL_LINUXKEYBOARD_H_
 #define CLI_DETAIL_LINUXKEYBOARD_H_
 
+#include <cerrno>
+#include <optional>
 #include <thread>
 #include <memory>
-#include <stdexcept>
 
 #include <cstdio>
 #include <termios.h>
@@ -62,28 +63,44 @@ public:
         }
     }
 
-    void WaitKbHit()
+    // true = stdin 上有字符可读；false = Stop() 已生效，servant 线程该退出了。
+    // 上游用 throw std::runtime_error("InputSource stop") 表达后者。
+    //
+    // 顺手修掉两处上游的问题（都是这一改造的必经之路，不是顺手清洁）：
+    //   ① select 返回 -1（终端 resize 的 EINTR 等）时，上游掉出函数尾 —— 无返回值，UB；
+    //   ② fd_set 只在循环外初始化一次，而 select 会改写它，第二轮的 FD_ISSET 读的是脏位。
+    bool WaitKbHit()
     {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);
-        FD_SET(readPipe, &rfds);
-
-        while (select(readPipe + 1, &rfds, nullptr, nullptr, nullptr) == 0);
-
-        if (FD_ISSET(readPipe, &rfds)) // stop called
+        for (;;)
         {
-            close(readPipe);
-            throw std::runtime_error("InputSource stop");
-        }
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(STDIN_FILENO, &rfds);
+            FD_SET(readPipe, &rfds);
 
-        if (FD_ISSET(STDIN_FILENO, &rfds)) // char from stdinput
-        {
-            return;
-        }
+            const int ready = select(readPipe + 1, &rfds, nullptr, nullptr, nullptr);
+            if (ready < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                assert(false);
+                return false;
+            }
+            if (ready == 0)
+                continue; // 无 timeout 时不该发生，保守重试
 
-        // cannot reach this point
-        assert(false);
+            if (FD_ISSET(readPipe, &rfds)) // stop called
+            {
+                close(readPipe);
+                return false;
+            }
+
+            if (FD_ISSET(STDIN_FILENO, &rfds)) // char from stdinput
+                return true;
+
+            assert(false); // 不可达：ready > 0 必有其一被置位
+            return false;
+        }
     }
 
     void Stop()
@@ -139,23 +156,20 @@ public:
         cv.notify_one();
     }
 
+    // 上游是 try{ while(true){...} }catch(const std::exception&){}，靠 WaitKbHit 抛出
+    // 来退出 servant 线程。每轮的事件顺序保持原样：先等 enabled，再等键。
     void Read() noexcept
     {
-        try
+        while (true)
         {
-            while (true)
             {
-                {
-                    std::unique_lock<std::mutex> lock(mtx);
-                    cv.wait(lock, [this]{ return enabled; }); // release mtx, suspend thread execution until enabled becomes true
-                }
-                auto k = Get();
-                Notify(k);
+                std::unique_lock<std::mutex> lock(mtx);
+                cv.wait(lock, [this]{ return enabled; }); // release mtx, suspend thread execution until enabled becomes true
             }
-        }
-        catch(const std::exception&)
-        {
-            // nothing to do: just exit
+            const auto k = Get();
+            if (!k)
+                return; // Stop() 已生效
+            Notify(*k);
         }
     }
 
@@ -167,9 +181,11 @@ public:
         return buffer;
     }
 
-    std::pair<KeyType,char> Get()
+    // nullopt = 被 Stop() 打断（原 throw 的那一支）
+    std::optional<std::pair<KeyType,char>> Get()
     {
-        is.WaitKbHit();
+        if (!is.WaitKbHit())
+            return {};
 
         auto ch = GetChar();
         switch(ch)

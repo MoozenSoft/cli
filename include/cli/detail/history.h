@@ -32,6 +32,7 @@
 
 #include <deque>
 #include <limits>
+#include <optional>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -146,11 +147,14 @@ public:
         return result;
     }
 
-    std::string At(std::size_t id) const
+    // 越界不再是异常，而是空 optional（本 fork 的 include/ 树不使用异常）。
+    // 调用方必须处理"没有这个条目"——见 cli.h 里 ExecFromHistory 的用法。
+    std::optional<std::string> At(std::size_t id) const
     {
-        std::size_t index = IdToIndex(id);
-        assert(index < buffer.size());
-        return buffer[index];
+        const auto index = IdToIndex(id);
+        if (!index)
+            return {};
+        return buffer[*index];
     }
 
     void ForgetLatest()
@@ -162,19 +166,26 @@ public:
 private:
 
     // oldest has index = size-1 and id = idOfOldest
-    // newest has index = 0      and id = idOfOldest + size-1 
+    // newest has index = 0      and id = idOfOldest + size-1
     std::size_t IndexToId(std::size_t index) const
     {
-        if (index > idOfOldest+buffer.size()-1)
-            throw std::out_of_range("Index not found in history");
+        // 唯一调用方是 Show()，它以 [0, size) 遍历 buffer，故 index 必然有效。
+        // 上游在这里 throw std::out_of_range 守的是一个不可达分支，随异常一并去掉。
+        assert(index < buffer.size());
         return idOfOldest + buffer.size() - 1 - index;
     }
 
-    std::size_t IdToIndex(std::size_t id) const
+    std::optional<std::size_t> IdToIndex(std::size_t id) const
     {
-        if (id < idOfOldest || id > idOfOldest+buffer.size()-1)
-            throw std::out_of_range("Index not found in history");
-        return idOfOldest + buffer.size() - 1 - id;
+        // 空 buffer 必须显式挡：上游写成 id > idOfOldest + buffer.size() - 1，
+        // size 为 0 时那个 -1 回绕成 SIZE_MAX，比较恒为假 → 不抛，返回一个越界下标。
+        // 原先靠 throw 兜着，现在失败通道是空 optional，所以这条得自己写。
+        if (buffer.empty())
+            return {};
+        const std::size_t newestId = idOfOldest + buffer.size() - 1;
+        if (id < idOfOldest || id > newestId)
+            return {};
+        return newestId - id;
     }
 
     void Insert(const std::string& item)

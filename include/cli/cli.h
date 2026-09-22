@@ -36,6 +36,8 @@
 #include <functional>
 #include <algorithm>
 #include <cctype> // std::isspace
+#include <charconv> // ExecFromHistory 解析历史条目号（无异常、失败有返回码）
+#include <optional>
 #include <type_traits>
 #include "colorprofile.h"
 #include "detail/history.h"
@@ -152,17 +154,10 @@ namespace cli
          */
         void ExitAction(const std::function< void(std::ostream&)>& action) { exitAction = action; }
 
-        /**
-         * @brief Add an handler that will be called when a @c std::exception (or derived) is thrown inside a command handler.
-         * If an exception handler is not set, the exception will be logget on the session output stream.
-         * 
-         * @param handler the function to be called when an exception is thrown, taking a @c std::ostream& parameter to write on that session console,
-         * the command entered and the exception thrown.
-         */
-        void StdExceptionHandler(const std::function< void(std::ostream&, const std::string& cmd, const std::exception&) >& handler)
-        {
-            exceptionHandler = handler;
-        }
+        // 上游此处是 StdExceptionHandler(handler)：接「命令处理器抛出的异常」，
+        // README 把它当公开特性宣传。本 fork 的 include/ 树不使用异常、消费方又以
+        // /EHs-c- / -fno-exceptions 编译（处理器抛不出东西），故该钩子连同 Feed 里的
+        // 两个 catch 一并移除。分歧说明见 fork 的 README。
 
         /**
          * @brief Add an handler that will be called when the user enter a wrong command (not existing command or having wrong parameters).
@@ -209,14 +204,6 @@ namespace cli
                 exitAction(out);
         }
 
-        void StdExceptionHandler(std::ostream& out, const std::string& cmd, const std::exception& e)
-        {
-            if (exceptionHandler)
-                exceptionHandler(out, cmd, e);
-            else
-                out << e.what() << '\n';
-        }
-
         void WrongCommandHandler(std::ostream& out, const std::string& cmd)
         {
             if (wrongCmdHandler)
@@ -240,7 +227,6 @@ namespace cli
         std::unique_ptr<Menu> rootMenu; // just to keep it alive
         std::function<void(std::ostream&)> enterAction;
         std::function<void(std::ostream&)> exitAction;
-        std::function<void(std::ostream&, const std::string& cmd, const std::exception& )> exceptionHandler;
         std::function<void(std::ostream&, const std::string& cmd)> wrongCmdHandler;
     };
 
@@ -358,11 +344,28 @@ namespace cli
 
         void ShowHistory() const { history.Show(out); }
 
-        void ExecFromHistory(unsigned index)
+        // 参数是**文本**而不是 unsigned：本 fork 的 from_string 只留 std::string 一条
+        // 支路（数值转换的失败通道原本是异常）。解析在下面用无异常的 from_chars 做。
+        void ExecFromHistory(const std::string& indexText)
         {
+            std::size_t index = 0;
+            const char *first = indexText.data();
+            const char *last = first + indexText.size();
+            const std::from_chars_result parsed = std::from_chars(first, last, index);
+            if (parsed.ec != std::errc{} || parsed.ptr != last)
+            {
+                out << "Invalid history index: " << indexText << '\n';
+                return;
+            }
+
             history.ForgetLatest();
             const auto cmd = history.At(index);
-            Feed(cmd);
+            if (!cmd)
+            {
+                out << "No such history entry: " << indexText << '\n';
+                return;
+            }
+            Feed(*cmd);
         }
 
         std::string PreviousCmd(const std::string& line)
@@ -781,15 +784,11 @@ namespace cli
             if (cmdLine.size() != paramSize+1) return false;
             if (Name() == cmdLine[0])
             {
-                try
-                {
-                    auto g = [&](auto ... pars){ func( session.OutStream(), pars... ); };
-                    Select<Args...>::Exec(g, std::next(cmdLine.begin()), cmdLine.end());
-                }
-                catch (std::bad_cast&)
-                {
-                    return false;
-                }
+                // 上游这里把整段包在 try{} catch(std::bad_cast&){ return false; } 里，
+                // 接的是 from_string 转换失败抛的 bad_conversion。本 fork 的 from_string
+                // 只剩 std::string 一条支路且不可能失败，那个 catch 已是死代码，删掉。
+                auto g = [&](auto ... pars){ func( session.OutStream(), pars... ); };
+                Select<Args...>::Exec(g, std::next(cmdLine.begin()), cmdLine.end());
                 return true;
             }
             return false;
@@ -904,7 +903,7 @@ namespace cli
             );
             globalScopeMenu->Insert(
                 "!", {"history entry index"},
-                [this](std::ostream&, unsigned cmdIndex){ ExecFromHistory(cmdIndex); },
+                [this](std::ostream&, const std::string& cmdIndex){ ExecFromHistory(cmdIndex); },
                 "Exec a command by index in the history"
             );
         }
@@ -917,27 +916,19 @@ namespace cli
 
         history.NewCommand(cmd); // add anyway to history
 
-        try
-        {
-            // global cmds check
-            bool found = globalScopeMenu->ScanCmds(strs, *this);
+        // 上游把下面这段包在 try{} catch(const std::exception&) catch(...) 里，接的是
+        // 「命令处理器自己抛异常」——那是 README 里文档化的特性（Cli::StdExceptionHandler）。
+        // 本 fork 的 include/ 树不使用异常，消费方又以 /EHs-c- / -fno-exceptions 编译，
+        // 处理器抛不出东西，故两个 catch 连同那个钩子一起移除。分歧见 fork 的 README。
+        //
+        // global cmds check
+        bool found = globalScopeMenu->ScanCmds(strs, *this);
 
-            // root menu recursive cmds check
-            if (!found) found = current->ScanCmds(strs, *this);
+        // root menu recursive cmds check
+        if (!found) found = current->ScanCmds(strs, *this);
 
-            if (!found) // wrong command handler if not found
-                cli.WrongCommandHandler(out, cmd);
-        }
-        catch(const std::exception& e)
-        {
-            cli.StdExceptionHandler(out, cmd, e);
-        }
-        catch(...)
-        {
-            out << "Cli. Unknown exception caught handling command line \""
-                << cmd
-                << "\"\n";
-        }
+        if (!found) // wrong command handler if not found
+            cli.WrongCommandHandler(out, cmd);
     }
 
     inline void CliSession::Prompt()

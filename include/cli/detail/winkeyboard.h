@@ -31,6 +31,7 @@
 #define CLI_DETAIL_WINKEYBOARD_H_
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 #include <memory>
@@ -59,30 +60,19 @@ public:
         events[1] = GetStdHandle(STD_INPUT_HANDLE); // Get a Windows handle to the keyboard input
     }
 
-    void WaitKbHit()
+    // true = 有键可读；false = Stop() 已生效，servant 线程该退出了。
+    // 上游用 throw std::runtime_error("InputSource stop") 表达后者，本 fork 不用异常。
+    bool WaitKbHit()
     {
-        // Wait for either the timer to expire or a key press event
-        DWORD dwResult = WaitForMultipleObjects(2, events, false, INFINITE);
+        // Wait for either the stop event to be set or a key press event
+        const DWORD dwResult = WaitForMultipleObjects(2, events, false, INFINITE);
 
-        if (dwResult == WAIT_FAILED)
-        {
-            // TODO
-            assert(false);
-        }
-        else
-        {
-            if (dwResult == WAIT_OBJECT_0) // WAIT_OBJECT_0 corresponds to the stop event
-            {
-                throw std::runtime_error("InputSource stop");
-            }
-            else
-            {
-                return;
-            }
-        }
+        if (dwResult == WAIT_OBJECT_0) // WAIT_OBJECT_0 corresponds to the stop event
+            return false;
 
-        // we can't reach this point
-        assert(false);
+        // WAIT_FAILED：上游在此 assert(false) 后照样返回给调用者去 _getch()，保持原行为
+        assert(dwResult != WAIT_FAILED);
+        return true;
     }
 
     void Stop()
@@ -112,25 +102,24 @@ public:
 
 private:
 
+    // 上游这里是一圈 try{ while(true){...} }catch(const std::exception&){}，
+    // 靠 WaitKbHit 抛出来退出 servant 线程。改为直接看 Get 的返回值，退出条件可见。
     void Read() noexcept
     {
-        try
+        while (true)
         {
-            while (true)
-            {
-                auto k = Get();
-                Notify(k);
-            }
-        }
-        catch (const std::exception&)
-        {
-            // nothing to do: just exit
+            const auto k = Get();
+            if (!k)
+                return; // Stop() 已生效
+            Notify(*k);
         }
     }
 
-    std::pair<KeyType, char> Get()
+    // nullopt = 被 Stop() 打断（原 throw 的那一支）
+    std::optional<std::pair<KeyType, char>> Get()
     {
-        is.WaitKbHit();
+        if (!is.WaitKbHit())
+            return {};
 
         int c = _getch();
         switch (c)

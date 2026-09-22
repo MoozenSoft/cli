@@ -7,7 +7,64 @@
 
 # cli
 
-A cross-platform header only C++14 library for interactive command line interfaces (Cisco style)
+A cross-platform header only **C++17** library for interactive command line interfaces (Cisco style)
+
+> ## 这是 `daniele77/cli` 的 fork，不是上游
+>
+> 基线：上游 `master` @ `769c5fa`（含 `v2.2.0`）。存在理由：消费方（Vase 插件框架）**以
+> `/EHs-c-` / `-fno-exceptions` 编译**，而头文件里的裸 `throw` / `try` 在那种配置下是
+> **解析期硬错误**，不是可选风格——所以本 fork 的 `include/` 树**不使用异常**。
+>
+> ### 与上游的分歧（都源于上面那一条）
+>
+> * **`detail::from_string` 只剩 `std::string` 一条支路。** 数值 / `bool` / `char` / 浮点 /
+>   `operator>>` 兜底连同 `bad_conversion` 一起删除——它们的失败通道是异常。主模板声明但
+>   不定义，所以注册一个非 `string` 参数的命令会在**链接期**失败，而不是静默给出某个失败值。
+>   需要数值参数的调用方自己用 `std::from_chars`（无异常、失败有返回码）。
+> * **全局命令 `!` 现在收文本参数**（原本是 `unsigned`），解析在 `CliSession::ExecFromHistory`
+>   里做，坏索引与不存在的条目各自打印一行提示后继续。
+> * **`Cli::StdExceptionHandler` 已移除。** 上游把它当公开特性宣传（"处理器里抛出的异常会被
+>   接住"，见原 README 的该节）；`CliSession::Feed` 与 `VariadicFunctionCommand::Exec` 里
+>   相关的三个 `catch` 一并删除——在关异常的编译下没有东西可接。
+> * **`detail::History::At()` 返回 `std::optional<std::string>`**，不再是越界即
+>   `throw std::out_of_range`。
+> * **`CliFileSession` 不再校验输入/输出流**（原 `throw std::invalid_argument`）：有效性由
+>   调用方在构造前保证。降级成"静默不校验"会让坏流跑成一个空会话，所以刻意留给调用方。
+> * **键盘层的停止信号不再是异常**：`InputSource::WaitKbHit()` 返回 `bool`，
+>   `Get()` 返回 `std::optional`，servant 线程靠返回值退出（原本是 `throw` 被外层 `catch`
+>   吞掉）。顺带修掉 `linuxkeyboard.h` 的两处既有问题：`select()` 返回 −1（如终端 resize 的
+>   `EINTR`）时上游掉出函数尾（无返回值，UB）；`fd_set` 只在循环外初始化一次，而 `select`
+>   会改写它，第二轮的 `FD_ISSET` 读的是脏位。
+>
+> ### Asio 整体移除
+>
+> `CLI_UseBoostAsio` / `CLI_UseStandaloneAsio` 两个选项与其构建分支已删，配套的 **16 个**
+> asio 相关头文件一并删除。后果：**没有远程/telnet 会话，没有异步接口**——
+> `boostasiocliasyncsession.h`、`boostasioremotecli.h`、`boostasioscheduler.h`、
+> `standaloneasio*` 对应的那三个、`detail/{boost,standalone,new*,old*}asio*.h`、
+> `detail/genericasio*`、`detail/genericcliasyncsession.h`、`detail/server.h`。
+> 本地会话（`clilocalsession.h`）与文件会话（`clifilesession.h`）**不受影响**：它们走
+> `scheduler.h` / `loopscheduler.h` / `commandprocessor.h` 这条与 asio 无关的路径。
+>
+> 因此本 fork **无第三方依赖**（`find_package(Threads)` 保留：键盘层用 `std::thread`）。
+>
+> ### 不变式由谁把守
+>
+> "`include/` 里不出现 `throw` / `try` / `catch`"这件事由**消费方的构建**把守：任何一次
+> 上游 merge 把异常带回来，症状是消费方全线编译失败，而不是运行期悄悄退化成 terminate。
+> 所以 fork 侧 CI 不是承重件，但下面这条 grep 值得留在提交前自查里：
+>
+> ```sh
+> grep -rnE "(^|[^:/a-zA-Z_])(throw|catch)[[:space:]]|[[:space:]]try[[:space:]]*\{" include/
+> ```
+>
+> （命中的应当只有注释。合并上游后尤其要跑一遍。）
+>
+> ### 与上游合并的纪律
+>
+> **不改头文件路径与文件名**，包括 `include/cli/` 这一层——merge 上游时目录对齐是机械活。
+> 代价是包名与头文件名不同源；这是有意换的。
+
 
 ![demo_local_session](https://user-images.githubusercontent.com/5451767/51046611-d1dadc00-15c6-11e9-8a0d-2c66efc83290.gif)
 
@@ -18,10 +75,10 @@ A cross-platform header only C++14 library for interactive command line interfac
 * Header only
 * Cross-platform (linux and windows)
 * Menus and submenus
-* Remote sessions (telnet)
+* ~~Remote sessions (telnet)~~ — **本 fork 已移除**（随 asio 一起）
 * Persistent history (navigation with arrow keys)
 * Autocompletion (with TAB key)
-* Async interface
+* ~~Async interface~~ — **本 fork 已移除**（随 asio 一起）
 * Colors
 
 ## How to get CLI library
@@ -31,6 +88,9 @@ A cross-platform header only C++14 library for interactive command line interfac
 * Using [Conan](https://conan.io/center/recipes/cli)
 
 ## Dependencies
+
+**本 fork 无第三方依赖**：asio 支持（远程/telnet 会话与异步接口）已整体移除，见顶部
+「这是 fork」一节。上游原文如下，供对照：
 
 The library has no dependencies if you don't need remote sessions.
 

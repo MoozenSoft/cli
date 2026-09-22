@@ -43,8 +43,8 @@ include(GNUInstallDirs)
 # ---------------------------------------------------------------
 option(CLI_BuildExamples "Build the examples." OFF)
 option(CLI_BuildTests "Build the unit tests." OFF)
-option(CLI_UseBoostAsio "Use Boost.Asio library." OFF)
-option(CLI_UseStandaloneAsio "Use standalone Asio library." OFF)
+# 本 fork 不提供 Asio 支持：boost-asio / standalone-asio 两条支路连同其头文件已移除
+# （见 README「与本 fork 的分歧」）。远程与异步会话因此不可用；本地与文件会话不受影响。
 
 # ---------------------------------------------------------------
 # Library
@@ -58,72 +58,19 @@ target_include_directories(cli
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
+# Threads **保留**：detail/{win,linux}keyboard.h 的 servant 线程要用（CliLocalSession 路径）。
+# 它是 CMake 自带模块解析的，不产生任何 vcpkg 依赖。
 find_package(Threads REQUIRED)
 target_link_libraries(cli INTERFACE Threads::Threads)
 
 # ---------------------------------------------------------------
-# Boost.Asio support
-# ---------------------------------------------------------------
-if(CLI_UseBoostAsio)
-    if(POLICY CMP0074)
-        cmake_policy(SET CMP0074 NEW)   # <PackageName>_ROOT
-    endif()
-
-    if(POLICY CMP0144)
-        cmake_policy(SET CMP0144 NEW)   # uppercase variables like BOOST_ROOT
-    endif()
-
-    if(POLICY CMP0167)
-        cmake_policy(SET CMP0167 OLD)   # re-enable FindBoost
-    endif()
-
-
-    set(Boost_NO_BOOST_CMAKE ON)
-    find_package(Boost 1.66 QUIET COMPONENTS system date_time)
-    add_definitions(-DBOOST_ALL_NO_LIB) # for windows
-
-    if(Boost_FOUND)
-        message(STATUS "Using compiled Boost libraries on ${CMAKE_SYSTEM_NAME}")
-        target_link_libraries(cli INTERFACE Boost::system Boost::date_time)
-    else()
-        message(STATUS "Boost libraries not found. Falling back to header-only mode.")
-        target_compile_definitions(cli INTERFACE
-            BOOST_ERROR_CODE_HEADER_ONLY
-            BOOST_SYSTEM_NO_LIB
-        )
-
-        # find headers (default locations)
-        find_path(BOOST_INCLUDE_PATH "boost/version.hpp")
-        if(NOT BOOST_INCLUDE_PATH)
-            message(FATAL_ERROR "Boost headers not found for header-only fallback!")
-        endif()
-        target_include_directories(cli INTERFACE ${BOOST_INCLUDE_PATH})
-    endif()
-
-    target_compile_definitions(cli INTERFACE BOOST_ASIO_NO_DEPRECATED=1)
-endif()
-
-# ---------------------------------------------------------------
-# Standalone Asio support
-# ---------------------------------------------------------------
-if(CLI_UseStandaloneAsio)
-    find_path(STANDALONE_ASIO_INCLUDE_PATH NAMES "asio.hpp" HINTS ${ASIO_INCLUDEDIR})
-    mark_as_advanced(STANDALONE_ASIO_INCLUDE_PATH)
-    if(NOT STANDALONE_ASIO_INCLUDE_PATH)
-        message(FATAL_ERROR "Standalone Asio headers not found. Set ASIO_INCLUDEDIR or STANDALONE_ASIO_INCLUDE_PATH.")
-    endif()
-
-    add_library(standalone_asio INTERFACE IMPORTED)
-    target_include_directories(standalone_asio SYSTEM INTERFACE ${STANDALONE_ASIO_INCLUDE_PATH})
-    target_link_libraries(standalone_asio INTERFACE Threads::Threads)
-    target_link_libraries(cli INTERFACE standalone_asio)
-endif()
-
-# ---------------------------------------------------------------
 # C++ standard
 # ---------------------------------------------------------------
+# 本 fork 的下限提到 **C++17**（上游写的是 14）：detail/history.h 用
+# std::optional 表达"没有这个历史条目"，以替掉原先 throw std::out_of_range 的
+# 失败通道。消费方（Vase）本来就按 C++20 编，这一提对它无影响。
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-    set(CMAKE_CXX_STANDARD 14)
+    set(CMAKE_CXX_STANDARD 17)
 endif()
 target_compile_features(cli INTERFACE cxx_std_${CMAKE_CXX_STANDARD})
 

@@ -32,7 +32,6 @@
 
 #include <string>
 #include <iostream>
-#include <stdexcept> // std::invalid_argument
 #include "cli.h" // CliSession
 
 namespace cli
@@ -41,14 +40,15 @@ namespace cli
 class CliFileSession : public CliSession
 {
 public:
-    /// @throw std::invalid_argument if @c _in or @c out are invalid streams
+    /// 流的有效性由**调用方**保证。本 fork 不在此校验：原先的两个
+    /// `throw std::invalid_argument` 在 /EHs-c- / -fno-exceptions 的消费方是解析期
+    /// 硬错误，而"降级成什么都不做"会让一个坏输入流静默跑成空会话。
+    /// 调用方应自己 `if (!in.good())` 之后再构造。
     explicit CliFileSession(Cli& _cli, std::istream& _in=std::cin, std::ostream& _out=std::cout) :
         CliSession(_cli, _out, 1),
         exit(false),
         in(_in)
     {
-        if (!_in.good()) throw std::invalid_argument("istream invalid");
-        if (!_out.good()) throw std::invalid_argument("ostream invalid");
         ExitAction(
             [this](std::ostream&) noexcept
             {

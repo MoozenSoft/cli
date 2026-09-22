@@ -30,47 +30,25 @@
 #ifndef CLI_DETAIL_FROMSTRING_H_
 #define CLI_DETAIL_FROMSTRING_H_
 
-// #define CLI_FROMSTRING_USE_BOOST
+// —— 本 fork 的偏离（上游此文件 283 行，这里只剩 std::string 一条支路）——
+//
+// 被删的是数值 / bool / char / 浮点 / operator>> 兜底这五类 from_string，连同
+// bad_conversion。理由不是"用不到"，而是它们的**失败通道是异常**，而本 fork 的
+// 整棵 include/ 树不使用异常（消费方以 /EHs-c- 或 -fno-exceptions 编译，头里的
+// 裸 throw 在那种配置下是解析期硬错误，不是可选风格）。
+//
+// 主模板**声明而不定义**：注册一个非 std::string 参数的命令会在**链接期**失败。
+// 这比"给个失败值"好——后者会让 `from_string<unsigned>("abc") -> 0` 这类东西
+// 静默地把一条坏命令送进历史执行，而链接错误只会响亮地挡在编译门外。
+//
+// 需要数值参数的调用方自己解析（std::from_chars：无异常、失败有返回码）。
 
-#ifdef CLI_FROMSTRING_USE_BOOST
-
-#include <boost/lexical_cast.hpp>
+#include <string>
 
 namespace cli
 {
 namespace detail
 {
-
-template <typename T>
-inline
-T from_string(const std::string& s)
-{
-    return boost::lexical_cast<T>(s);
-}
-
-} // namespace detail
-} // namespace cli
-
-#else
-
-#include <exception>
-#include <limits>
-#include <string>
-#include <sstream>
-
-namespace cli
-{
-
-    namespace detail
-    {
-        class bad_conversion : public std::bad_cast
-        {
-            public:
-                const char* what() const noexcept override {
-                    return "bad from_string conversion: "
-                        "source string value could not be interpreted as target";
-                }
-        };
 
 template <typename T>
 inline T from_string(const std::string& s);
@@ -81,203 +59,7 @@ inline std::string from_string(const std::string& s)
     return s;
 }
 
-template <>
-inline std::nullptr_t from_string(const std::string& /*s*/)
-{
-    return nullptr;
-}
-
-namespace detail
-{
-
-template <typename T>
-inline T unsigned_digits_from_string(const std::string& s)
-{
-    if (s.empty())
-        throw bad_conversion();
-    T result = 0;
-    for (char c: s)
-    {
-        if (!std::isdigit(c))
-            throw bad_conversion();
-        const T digit = static_cast<T>( c - '0' );
-        const T tmp = (result * 10) + digit;
-        if (result != ((tmp-digit)/10) || (tmp < result))
-            throw bad_conversion();
-        result = tmp;
-    }
-    return result;
-}
-
-template <typename T>
-inline T unsigned_from_string(std::string s)
-{
-    if (s.empty())
-        throw bad_conversion();
-    if (s[0] == '+')
-    {
-        s = s.substr(1);
-    }
-    return unsigned_digits_from_string<T>(s);
-}
-
-template <typename T>
-inline T signed_from_string(std::string s)
-{
-    if (s.empty())
-        throw bad_conversion();
-    using U = std::make_unsigned_t<T>;
-    if (s[0] == '-')
-    {
-        s = s.substr(1);
-        const U val = unsigned_digits_from_string<U>(s);
-        auto min = std::numeric_limits<T>::min(); // this to avoid overflow warnings. Please NOTE: const auto produces warning!
-        if ( val > static_cast<U>( - min ) )
-            throw bad_conversion();
-        return (- static_cast<T>(val));
-    }
-    else if (s[0] == '+')
-    {
-        s = s.substr(1);
-    }
-    const U val = unsigned_digits_from_string<U>(s);
-    if (val > static_cast<U>( std::numeric_limits<T>::max() ))
-        throw bad_conversion();
-    return static_cast<T>(val);
-}
-
 } // namespace detail
-
-// signed
-
-template <> inline signed char 
-from_string(const std::string& s) { return detail::signed_from_string<signed char>(s); }
-
-template <> inline short int 
-from_string(const std::string& s) { return detail::signed_from_string<short int>(s); }
-
-template <> inline int
-from_string(const std::string& s) { return detail::signed_from_string<int>(s); }
-
-template <> inline long int
-from_string(const std::string& s) { return detail::signed_from_string<long int>(s); }
-
-template <> inline long long int
-from_string(const std::string& s) { return detail::signed_from_string<long long int>(s); }
-
-// unsigned
-
-template <> inline unsigned char
-from_string(const std::string& s) { return detail::unsigned_from_string<unsigned char>(s); }
-
-template <> inline unsigned short int
-from_string(const std::string& s) { return detail::unsigned_from_string<unsigned short int>(s); }
-
-template <> inline unsigned int
-from_string(const std::string& s) { return detail::unsigned_from_string<unsigned int>(s); }
-
-template <> inline unsigned long int
-from_string(const std::string& s) { return detail::unsigned_from_string<unsigned long int>(s); }
-
-template <> inline unsigned long long int
-from_string(const std::string& s) { return detail::unsigned_from_string<unsigned long long int>(s); }
-
-// bool
-
-template <>
-inline bool from_string(const std::string& s)
-{
-    if (s == "true") return true;
-    else if (s == "false") return false;
-    const auto value = detail::signed_from_string<long long int>(s);
-    if (value == 1) return true;
-    else if (value == 0) return false;
-    throw bad_conversion();            
-}
-
-// chars
-
-template <>
-inline char from_string(const std::string& s)
-{
-    if (s.size() != 1) throw bad_conversion();
-    return s[0];            
-}
-
-// floating points
-
-template <>
-inline float from_string(const std::string& s)
-{
-    if ( std::any_of(s.begin(), s.end(), [](char c){return std::isspace(c);} ) )
-        throw bad_conversion();
-    std::string::size_type sz;
-    float result = {};
-    try {
-        result = std::stof(s, &sz);
-    } catch (const std::exception&) {
-        throw bad_conversion();
-    }
-    if (sz != s.size())
-        throw bad_conversion();
-    return result;
-}
-
-template <>
-inline double from_string(const std::string& s)
-{
-    if ( std::any_of(s.begin(), s.end(), [](char c){return std::isspace(c);} ) )
-        throw bad_conversion();
-    std::string::size_type sz;
-    double result = {};
-    try {
-        result = std::stod(s, &sz);
-    } catch (const std::exception&) {
-        throw bad_conversion();
-    }
-    if (sz != s.size())
-        throw bad_conversion();
-    return result;
-}
-
-template <>
-inline long double from_string(const std::string& s)
-{
-    if ( std::any_of(s.begin(), s.end(), [](char c){return std::isspace(c);} ) )
-        throw bad_conversion();
-    std::string::size_type sz;
-    long double result = {};
-    try {
-        result = std::stold(s, &sz);
-    } catch (const std::exception&) {
-        throw bad_conversion();
-    }
-    if (sz != s.size())
-        throw bad_conversion();
-    return result;
-}
-
-// fallback: operator <<
-
-template <typename T>
-inline T from_string(const std::string& s)
-{
-    std::stringstream interpreter;
-    T result;
-
-    if(!(interpreter << s) ||
-        !(interpreter >> result) ||
-        !(interpreter >> std::ws).eof())
-        throw bad_conversion();
-
-    return result;
-}
-
-    } // namespace detail
-
 } // namespace cli
-
-
-#endif // CLI_FROMSTRING_USE_BOOST
 
 #endif // CLI_DETAIL_FROMSTRING_H_
